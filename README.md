@@ -1,5 +1,12 @@
 # MOTUS DOT Scraper
 
+For fast local CSVs, use `python -m python_scraper.bulk_export` as documented in
+[Fast local CSV export](docs/SCRAPER_PERFORMANCE.md#fast-local-csv-export).
+
+For the current scheduled scraper, tuning, recovery and offline tests, see
+[Scraper performance and recovery](docs/SCRAPER_PERFORMANCE.md). The setup below
+describes the older Python interface.
+
 Scrapes US federal carrier registration data from [MOTUS](https://motus.dot.gov/) and stores it locally and in Supabase.
 
 ## Setup

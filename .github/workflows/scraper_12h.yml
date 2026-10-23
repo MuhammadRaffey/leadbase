@@ -11,6 +11,9 @@ concurrency:
   group: scraper-12h
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   scrape:
     name: Scrape MOTUS & Upsert to Supabase
@@ -33,9 +36,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r python_scraper/requirements.txt
 
+      - name: Verify scraper offline
+        run: python -m unittest discover -s python_scraper/tests -v
+
+      - name: Restore scan checkpoint
+        uses: actions/cache/restore@v4
+        with:
+          path: motus_scraper_state_v10.json
+          key: scraper-state-v2-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            scraper-state-v2-${{ runner.os }}-
+
       - name: Run 12-Hour Scraper Cycle
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          python -u python_scraper/auto_scraper_12h.py --once
+          python -u python_scraper/auto_scraper_12h.py --once --max-run-seconds 19800
+
+      - name: Save scan checkpoint even after failure
+        if: always() && hashFiles('motus_scraper_state_v10.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: motus_scraper_state_v10.json
+          key: scraper-state-v2-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}

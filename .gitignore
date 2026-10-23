@@ -19,3 +19,19 @@ import_progress.json
 *_progress.json
 *_state.json
 .temp/
+
+# Generated local exports, browser diagnostics, and temporary files
+*.source.json
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.bak
+*.tmp
+*.download
+sync_log.json
+.playwright-mcp/
+
+# Local execution notes and support diagnostics
+docs/superpowers/
+docs/MOTUS_ACCESS_SUPPORT.md
