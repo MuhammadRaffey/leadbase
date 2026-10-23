@@ -167,6 +167,83 @@ This is a separate source snapshot, not a completed MOTUS scan. FMCSA documents
 that census data is refreshed daily from a 24-hour-old database and excludes some
 entity types; see the [Open Data Program](https://www.fmcsa.dot.gov/registration/fmcsa-data-dissemination-program).
 
+### Direct CSV extraction and measured limits
+
+`python_scraper.direct_export` writes the eight contact columns directly from MOTUS
+carrier details, without Supabase or census data. It omits the equipment request,
+which is unnecessary for this CSV, and overlaps requests through the shared rate
+limiter. SQLite records successful and missing responses; rerunning the same command
+repairs the CSV from the checkpoint and resumes unresolved work. A 403 stops the run
+and is never recorded as a missing carrier. Keep output and checkpoint files together.
+
+For previously confirmed IDs:
+
+```powershell
+python -m python_scraper.direct_export --ids-csv carriers_4582560_10000000.csv --output-csv direct_contacts.csv --state-db direct_contacts.sqlite3 --max-seconds 180
+```
+
+For candidates discovered from MOTUS public name search:
+
+```powershell
+python -m python_scraper.direct_export --query TRANSPORT --max-search-pages 5 --output-csv direct_search.csv --state-db direct_search.sqlite3 --max-new-checks 100 --max-seconds 120
+```
+
+Search filters candidates to USDOT 4,582,560–10,000,000 by default. Repeat `--query`
+for additional names. Search summaries lack contact details, so each candidate still
+requires a detail request. Name searches provide partial directory coverage, even
+when every page of an individual query is retrieved. The adjacent `.source.json`
+records query truncation, range coverage, timings and HTTP responses. Discovery time
+is separate from detail extraction time and included in `total_elapsed_seconds`.
+`--max-seconds` limits detail extraction; discovery is bounded by pages and retries.
+
+Live checks on 2026-10-23 found:
+
+| Test | Observed result |
+| --- | --- |
+| 60 previously confirmed carriers, 4 requests/second cap | 16.815 seconds, 60 HTTP 200, no retries |
+| 100 previously confirmed carriers, 8 requests/second cap | 29.783 seconds, 2 recovered timeouts; slower throughput |
+| Contiguous numeric scan at 4 requests/second | Stopped after 6.602 seconds on HTTP 403; incomplete |
+| Five TRANSPORT search pages, then in-range details | 500 summaries in 13.236 seconds, 3 contacts in 1.226 seconds; no 403 |
+| Subsequent 124-ID CSV verification | Stopped on HTTP 403 for USDOT 4,582,560; incomplete |
+
+Known-carrier samples reused previously fetched IDs and may benefit from caching.
+These short checks do not establish sustained throughput or a safe source rate.
+The former four-request default was a tested tuning point, not a published allowance.
+The direct exporter now shares the scheduled scraper's conservative **0.5
+requests/second** default, including public search discovery. Explicit rate overrides
+remain available; a successful short benchmark does not establish an allowed rate.
+The full numeric range has **not** been completed directly, and the source's access
+denials remain unresolved. Successful search/detail calls alongside denied calls do
+not identify which source rule caused the denial. The bulk export's earlier
+67-second result measures a different data source and does not apply here.
+
+#### Follow-up verification on 2026-10-23
+
+The previously denied `/api/carriers/4582560` returned HTTP 200 in a fresh check.
+Two bounded runs with one worker and a 0.5 request/second cap then produced:
+
+| Test | Observed result |
+| --- | --- |
+| Numeric range 4582560–4582579 | All 20 resolved in 66.754 seconds: 1 HTTP 200, 19 HTTP 404; one recovered timeout, no 403 |
+| First 20 of the 124 previously confirmed IDs | 20 HTTP 200 in 38.806 seconds; no retries, timeouts or 403 |
+
+The known-ID run used the corrected default rate without a command-line override.
+Its manifest remains `paused` because only 20 of 124 candidates were requested.
+Evidence is saved in `scratch/403_numeric_check.source.json` and
+`scratch/403_known_id_check.source.json`, with their CSVs and SQLite checkpoints.
+These checks demonstrate restored access for these samples; they do **not** prove
+that rate caused the earlier denial or that the full range can run without denial.
+The exact source restriction remains unidentified.
+
+On a future 403, the shared client immediately stops queued traffic and records
+`http.access_denial`: UTC time, requested URL, source date, content type and a decoded
+denial reference when available. It reads at most 4 KiB for at most one second;
+an unreadable denial page still stops the run without retrying. It does not record
+response cookies or the response body. Include the reference in an FMCSA support
+request. [Akamai's troubleshooting guidance](https://community.akamai.com/customers/s/article/Access-denied-to-various-sites-served-through-Akamai?language=en_US)
+discusses client reputation as a possible cause; this is not a diagnosis of this
+particular denial.
+
 ### Verification
 
 Each run prints a JSON summary and saves it into `sync_runs.stats`: HTTP status

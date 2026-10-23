@@ -2,13 +2,15 @@
 
 import asyncio
 from collections import Counter
-from datetime import timezone
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from html import unescape
 import json
 import math
 import os
 from pathlib import Path
 import random
+import re
 import time
 
 
@@ -115,6 +117,43 @@ class RequestClient:
                         self.access_denied = (
                             f'HTTP 403: {url}; source denied access. '
                             'Queued requests stopped; restore source access before restarting.')
+                        # Capture only bounded support metadata, never cookies or
+                        # the response body. A failed body read must still stop
+                        # the pool rather than enter the transient retry path.
+                        denial = {
+                            'time_utc': datetime.now(timezone.utc).isoformat(),
+                            'url': url, 'reference': None,
+                            'content_type': response.headers.get('Content-Type'),
+                            'server_date': response.headers.get('Date'),
+                        }
+                        self.metrics['access_denial'] = denial
+
+                        async def collect_reference():
+                            body = bytearray()
+                            try:
+                                async with asyncio.timeout(1):
+                                    while len(body) < 4096:
+                                        chunk = await response.content.read(4096 - len(body))
+                                        if not chunk:
+                                            break
+                                        body.extend(chunk)
+                            except (aiohttp.ClientError, asyncio.TimeoutError):
+                                pass
+                            match = re.search(r'Reference\s*#\s*([A-Za-z0-9.-]+)(?=[\s<])',
+                                              unescape(body.decode('utf-8', errors='replace')))
+                            if match:
+                                reference = match.group(1)[:200]
+                                denial['reference'] = reference
+                                self.access_denied += f' Reference #{reference}.'
+
+                        diagnostic = asyncio.create_task(collect_reference())
+                        try:
+                            await asyncio.shield(diagnostic)
+                        except asyncio.CancelledError:
+                            # Another denied worker can cancel this TaskGroup.
+                            # Keep the response open for the bounded diagnostic.
+                            await diagnostic
+                            raise
                         raise AccessDenied(self.access_denied)
                     if status != 429 and not 500 <= status < 600:
                         raise RequestFailure(f'HTTP {status}: {url}')

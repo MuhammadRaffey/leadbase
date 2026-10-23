@@ -117,6 +117,83 @@ class HttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.times), 1)
         self.assertEqual(client.metrics['retries'], 0)
 
+    async def test_forbidden_preserves_support_reference_without_response_secrets(self):
+        self.statuses = [(403, {'Set-Cookie': 'private=session'},
+                          '<h1>Access Denied</h1>Reference&#32;&#35;18&#46;abc&#46;123&#46;def\n')]
+        client = pipeline.RequestClient(self.session, requests_per_second=1000)
+        with self.assertRaises(pipeline.AccessDenied) as caught:
+            await client.get_json(self.url)
+        self.assertIn('18.abc.123.def', str(caught.exception))
+        denial = client.metrics['access_denial']
+        self.assertEqual(denial['reference'], '18.abc.123.def')
+        self.assertEqual(denial['url'], self.url)
+        self.assertIn('time_utc', denial)
+        self.assertNotIn('private=session', json.dumps(denial))
+        self.assertEqual(client.metrics['requests'], 1)
+        self.assertEqual(client.metrics['retries'], 0)
+
+    async def test_forbidden_latches_before_reading_slow_diagnostic_body(self):
+        from unittest.mock import AsyncMock, Mock
+        import aiohttp
+        reading, release = asyncio.Event(), asyncio.Event()
+
+        async def read_body(_):
+            reading.set()
+            await release.wait()
+            raise aiohttp.ClientPayloadError('truncated denial page')
+
+        response = Mock(status=403, headers={})
+        response.content.read = read_body
+        context = AsyncMock()
+        context.__aenter__.return_value = response
+        session = Mock()
+        session.get.return_value = context
+        client = pipeline.RequestClient(session, requests_per_second=1000)
+        request = asyncio.create_task(client.get_json(self.url))
+        await reading.wait()
+        try:
+            self.assertIsNotNone(client.access_denied)
+            with self.assertRaises(pipeline.AccessDenied):
+                await client.get_json(self.url)
+        finally:
+            release.set()
+            result = await asyncio.gather(request, return_exceptions=True)
+        self.assertIsInstance(result[0], pipeline.AccessDenied)
+        self.assertEqual(session.get.call_count, 1)
+        self.assertEqual(client.metrics['retries'], 0)
+
+    async def test_pool_cancellation_preserves_fragmented_denial_reference(self):
+        from unittest.mock import AsyncMock, Mock
+        reading = asyncio.Event()
+        fragments = [b'<h1>Access Denied</h1>Reference&#32;&#35;18.',
+                     b'abc.123.def\n', b'']
+
+        async def read_body(_):
+            reading.set()
+            await asyncio.sleep(.03)
+            return fragments.pop(0)
+
+        response = Mock(status=403, headers={})
+        response.content.read = read_body
+        context = AsyncMock()
+        context.__aenter__.return_value = response
+        session = Mock()
+        session.get.return_value = context
+        client = pipeline.RequestClient(session, requests_per_second=1000)
+
+        async def fetch(dot):
+            if dot == 2:
+                await reading.wait()
+            return await client.get_json(self.url)
+
+        async def save(batch):
+            self.fail('Denied records must not be saved')
+
+        with self.assertRaises(ExceptionGroup):
+            await pipeline.process_chunk([1, 2], fetch, save, workers=2)
+        self.assertEqual(client.metrics['access_denial']['reference'], '18.abc.123.def')
+        self.assertEqual(session.get.call_count, 1)
+
     async def test_shared_pacing_limits_concurrent_requests(self):
         self.statuses = [(200, {}, '{}')] * 3
         client = pipeline.RequestClient(self.session, requests_per_second=40)
